@@ -8,44 +8,71 @@ open ChunkProtocol
 let callbacks = {
     InitialState = fun () -> ()
 
-    OnConnectionClose = fun () reason -> printf "OnConnectionClose(%s)\n" reason
+    OnConnectionClose = fun reason () -> printf "OnConnectionClose(%s)\n" reason
 
-    OnMessageReceived = fun () message ->
+    OnMessageReceived = fun message () ->
         match message with
         | Handshake1 version ->
-            printf "Handshake 1\n\tversion = %d\n" version
+            printf "<= Handshake 1\n\tversion = %d\n" version
 
         | Handshake2 {InitTimestamp=ts; RandomData=data} ->
-            printf "Handshake 2\n\ttimestamp = %d\n\tbytes =\n%s\n"
+            printf "<= Handshake 2\n\ttimestamp = %d\n\tbytes =\n%s\n"
                    ts
                    (Utils.hexdump data)
 
         | Handshake3 handshake ->
-            printf "Handshake 3\n\tack_timestamp = %d\n\tread_timestamp = %d\n\tack_bytes =\n%s\n"
+            printf "<= Handshake 3\n\tack_timestamp = %d\n\tread_timestamp = %d\n\tack_bytes =\n%s\n"
                    handshake.AckTimestamp
                    handshake.ReadTimestamp
                    (Utils.hexdump handshake.AckRandomData)
 
         | ChunkData (header, data) ->
-            printf "Chunk:\n\theader_type = %A\n\tstream_id = %d\n\ttimestamp = %d\n\tlength = %d\n\t message_stream_id = %d\n\tbytes =\n%s\n"
+            printf "<= Chunk:\n\theader_type = %A\n\tstream_id = %d\n\ttimestamp = %d\n\tremaining = %d\n\tmessage_stream_id = %d\n\tmessage_type = %A\n\tbytes =\n%s\n"
                    header.MessageHeader
                    header.ChunkStreamId
                    header.Timestamp
-                   header.Length
+                   header.MessageRemaining
                    header.MessageStreamId
+                   header.MessageType
                    (Utils.hexdump data)
 
-    OnSetChunkSize = fun () size -> printf "OnSetChunkSize(%d)\n" size
+    OnMessageSent = fun message () ->
+        match message with
+        | Handshake1 version ->
+            printf "=> Handshake 1\n\tversion = %d\n" version
+
+        | Handshake2 {InitTimestamp=ts; RandomData=data} ->
+            printf "=> Handshake 2\n\ttimestamp = %d\n\tbytes =\n%s\n"
+                   ts
+                   (Utils.hexdump data)
+
+        | Handshake3 handshake ->
+            printf "=> Handshake 3\n\tack_timestamp = %d\n\tread_timestamp = %d\n\tack_bytes =\n%s\n"
+                   handshake.AckTimestamp
+                   handshake.ReadTimestamp
+                   (Utils.hexdump handshake.AckRandomData)
+
+        | ChunkData (header, data) ->
+            printf "=> Chunk:\n\theader_type = %A\n\tstream_id = %d\n\ttimestamp = %d\n\tremaining = %d\n\tmessage_stream_id = %d\n\tmessage_type = %A\n\tbytes =\n%s\n"
+                   header.MessageHeader
+                   header.ChunkStreamId
+                   header.Timestamp
+                   header.MessageRemaining
+                   header.MessageStreamId
+                   header.MessageType
+                   (Utils.hexdump data)
+
+    OnSetChunkSize = fun size () -> printf "OnSetChunkSize(%d)\n" size
 
     OnAbort = fun () -> printf "Abort()\n"
 
-    OnAcknowledge = fun () size -> printf "Acknowledge(%d)\n" size
+    OnAcknowledge = fun size () -> printf "Acknowledge(%d)\n" size
 
-    OnUserControl = fun () data -> printf "UserControl():\n%s\n" (Utils.hexdump data)
+    OnUserControl = fun data () -> printf "UserControl():\n%s\n" (Utils.hexdump data)
 
-    OnWindowAckSize = fun () size -> printf "WindowAckSize(%d)\n" size
+    OnWindowAckSize = fun size () -> printf "WindowAckSize(%d)\n" size
 
-    OnSetPeerBandwidth = fun () size -> printf "SetPeerBandwidth(%d)\n" size
+    OnSetPeerBandwidth = fun size ltype () -> printf "SetPeerBandwidth(%d, %d)\n" size ltype
 }
 
 [<EntryPoint>]
