@@ -62,17 +62,26 @@ let callbacks = {
                    header.MessageType
                    (Utils.hexdump data)
 
-    OnSetChunkSize = fun size () -> printf "OnSetChunkSize(%d)\n" size
+    OnSetChunkSize = fun size () ->
+        printf "OnSetChunkSize(%d)\n" size
 
-    OnAbort = fun () -> printf "Abort()\n"
+    OnAbort = fun () ->
+        printf "Abort()\n"
 
-    OnAcknowledge = fun size () -> printf "Acknowledge(%d)\n" size
+    OnAcknowledge = fun size () ->
+        printf "Acknowledge(%d)\n" size
 
-    OnUserControl = fun data () -> printf "UserControl():\n%s\n" (Utils.hexdump data)
+    OnUserControl = fun data () ->
+        printf "UserControl():\n%s\n" (Utils.hexdump data)
 
-    OnWindowAckSize = fun size () -> printf "WindowAckSize(%d)\n" size
+    OnWindowAckSize = fun size () ->
+        printf "WindowAckSize(%d)\n" size
 
-    OnSetPeerBandwidth = fun size ltype () -> printf "SetPeerBandwidth(%d, %d)\n" size ltype
+    OnSetPeerBandwidth = fun size ltype () ->
+        printf "SetPeerBandwidth(%d, %d)\n" size ltype
+
+    OnAMFZeroMessage = fun (command, txn, value) () ->
+        printf "AMFZeroMessage()\n\tcommand = %s\n\ttxn = %d\n\tparams = %A\n" command txn value
 }
 
 [<EntryPoint>]

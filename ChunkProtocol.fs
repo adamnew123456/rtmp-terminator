@@ -141,6 +141,7 @@ type ChunkEvents<'state> = {
     OnUserControl: System.ArraySegment<uint8> -> 'state -> 'state
     OnWindowAckSize: uint32 -> 'state -> 'state
     OnSetPeerBandwidth: uint32 -> uint8 -> 'state -> 'state
+    OnAMFZeroMessage: (string * uint32 * AMFZero.ValueType) -> 'state -> 'state
 }
 
 /// <summary>
@@ -477,6 +478,17 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let ack_window = be_bytes_to_uint32 (full_slice message_bytes)
             let limit_type = message_bytes.[5]
             invoke_callback (conn.Callbacks.OnSetPeerBandwidth ack_window limit_type) conn
+
+        | CommandAMF0 ->
+            let (cmd_end, cmd_context) = AMFZero.parse (full_slice message_bytes)
+            let (txn_end, txn_context) = AMFZero.parse cmd_end
+            let (_, param_context) = AMFZero.parse txn_end
+
+            let (AMFZero.StringVal command) = cmd_context.Value
+            let (AMFZero.NumberVal transaction) = txn_context.Value
+
+            invoke_callback (conn.Callbacks.OnAMFZeroMessage (command, uint32 transaction, param_context.Value))
+                            conn
 
         | _ ->
             conn

@@ -46,6 +46,29 @@ let range_slice (array: 'a array) (offset: int) (count: int) =
     System.ArraySegment(array, offset, count)
 
 /// <summary>
+/// Converts bytes into a big-endian 64-bit signed integer
+/// </summary>
+let be_bytes_to_int64 (slice: System.ArraySegment<byte>) =
+    let msb = uint64 slice.[0]
+    let msb_1 = uint64 slice.[1]
+    let msb_2 = uint64 slice.[2]
+    let msb_3 = uint64 slice.[3]
+    let lsb_3 = uint64 slice.[4]
+    let lsb_2 = uint64 slice.[5]
+    let lsb_1 = uint64 slice.[6]
+    let lsb = uint64 slice.[7]
+
+    (msb <<< 56)
+    + (msb_1 <<< 48)
+    + (msb_2 <<< 40)
+    + (msb_3 <<< 32)
+    + (lsb_3 <<< 24)
+    + (lsb_2 <<< 16)
+    + (lsb_1 <<< 8)
+    + lsb
+    |> int64
+
+/// <summary>
 /// Converts bytes into a big-endian 32-bit unsigned integer
 /// </summary>
 let be_bytes_to_uint32 (slice: System.ArraySegment<byte>) =
@@ -63,6 +86,20 @@ let be_bytes_to_uint24 (slice: System.ArraySegment<byte>) =
     let mid = uint32 slice.[1]
     let lsb = uint32 slice.[2]
     (msb <<< 16) + (mid <<< 8) + lsb
+
+/// <summary>
+/// Converts bytes into a big-endian 16-bit unsigned integer
+/// </summary>
+let be_bytes_to_uint16 (slice: System.ArraySegment<byte>) =
+    let msb = uint16 slice.[0]
+    let lsb = uint16 slice.[1]
+    (msb <<< 8) + lsb
+
+/// <summary>
+/// Converts bytes into a big-endian 64-bit double
+/// </summary>
+let be_bytes_to_double (slice: System.ArraySegment<byte>) =
+    System.BitConverter.Int64BitsToDouble(be_bytes_to_int64 slice)
 
 /// <summary>
 /// Converts a 32-bit unsigned integer into big-endian bytes

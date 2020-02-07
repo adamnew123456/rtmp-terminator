@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <Compile Include="Utils.fs" />
+    <Compile Include="AMFZero.fs" />
     <Compile Include="ChunkProtocol.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
