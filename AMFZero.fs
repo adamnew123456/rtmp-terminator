@@ -165,3 +165,125 @@ let rec parse_dispatch (slice: System.ArraySegment<uint8>) (refs: Map<uint16, Va
 let parse (slice: System.ArraySegment<uint8>) =
     let (slice, refs, value) = parse_dispatch slice Map.empty
     (slice, {Value=value; Context=refs})
+
+/// <summary>
+/// Encodes a short string without any type prefix
+/// </summary>
+let encode_short_string (slice: System.ArraySegment<uint8>) (value: string) =
+    let mutable slicem = slice
+    let bytes = System.Text.Encoding.UTF8.GetBytes(value)
+    uint16_to_be_bytes (uint16 bytes.Length) slicem
+    bytes.CopyTo(slicem.Array, slicem.Offset + 2)
+    slicem.Slice(2 + bytes.Length)
+
+/// <summary>
+/// Encodes primitive AMF0 values into the slice
+/// </summary>
+let encode_simple (slice: System.ArraySegment<uint8>) (value: ValueType) =
+    let mutable slicem = slice
+    match value with
+    | NumberVal value ->
+        slicem.[0] <- 0uy
+        double_to_be_bytes value (slicem.Slice(1))
+        slicem.Slice(9)
+
+    | BooleanVal value ->
+        slicem.[0] <- 1uy
+        slicem.[1] <- if value then 1uy else 0uy
+        slicem.Slice(2)
+
+    | StringVal value ->
+        let bytesCount = System.Text.Encoding.UTF8.GetByteCount(value)
+        if bytesCount > 65535 then
+            let bytes = System.Text.Encoding.UTF8.GetBytes(value)
+            slicem.[0] <- 12uy
+            uint32_to_be_bytes (uint32 bytes.Length) (slicem.Slice(1))
+            bytes.CopyTo(slicem.Array, slicem.Offset + 5)
+            slicem.Slice(5 + bytes.Length)
+        else
+            slicem.[0] <- 2uy
+            encode_short_string (slicem.Slice(1)) value
+
+    | NullVal ->
+        slicem.[0] <- 5uy
+        slicem.Slice(1)
+
+    | UndefinedVal ->
+        slicem.[0] <- 6uy
+        slicem.Slice(1)
+
+    | ReferenceVal ref ->
+        slicem.[0] <- 7uy
+        uint16_to_be_bytes ref (slicem.Slice(1))
+        slicem.Slice(3)
+
+    | DateVal datetime ->
+        let unix_ms = datetime.ToUnixTimeMilliseconds()
+        slicem.[0] <- 11uy
+        double_to_be_bytes (double unix_ms)  (slicem.Slice(1))
+        slicem.[9] <- 0uy
+        slicem.[10] <- 0uy
+        slicem.Slice(11)
+
+    | XmlVal xml ->
+        let bytes = System.Text.Encoding.UTF8.GetBytes(xml)
+        slicem.[0] <- 15uy
+        uint32_to_be_bytes (uint32 bytes.Length) (slicem.Slice(1))
+        bytes.CopyTo(slicem.Array, slicem.Offset + 5)
+        slicem.Slice(5 + bytes.Length)
+
+    | _ ->
+        failwithf "Programming error: Cannot encode value %A with encode_simple"
+                  value
+
+/// <summary>
+/// Encodes an AMF0 message into the given buffer
+/// </summary>
+let rec encode (slice: System.ArraySegment<uint8>) (value: ValueType) =
+    let mutable slicem = slice
+
+    let rec encode_object slice fields =
+        let mutable slicem = slice
+        match fields with
+        | [] ->
+            uint16_to_be_bytes 0us slice
+            slicem.[2] <- 9uy
+            slicem.Slice(3)
+
+        | (name, value) :: rest ->
+            let after_name = encode_short_string slicem name
+            let after_value = encode after_name value
+            encode_object after_value rest
+
+    let rec encode_array slice values =
+        let mutable slicem = slice
+        match values with
+        | [] ->
+            slicem
+
+        | head :: tail ->
+            let after_head = encode slice head
+            encode_array after_head tail
+
+    match value with
+    | ObjectVal fields ->
+        slicem.[0] <- 3uy
+        encode_object (slice.Slice(1)) (Map.toList fields)
+
+    | EcmaArrayVal fields ->
+        slicem.[0] <- 8uy
+        uint32_to_be_bytes (uint32 (Map.count fields)) (slicem.Slice(1))
+        encode_object (slicem.Slice(5)) (Map.toList fields)
+
+    | StrictArrayVal values ->
+        slicem.[0] <- 10uy
+        uint32_to_be_bytes (uint32 (List.length values)) (slicem.Slice(1))
+        encode_array (slicem.Slice(5)) values
+
+    | TypedObjectVal (name, fields) ->
+        slicem.[0] <- 16uy
+        let after_name = encode_short_string (slicem.Slice(1)) name
+        encode_object after_name (Map.toList fields)
+
+    | _ ->
+        encode_simple slice value

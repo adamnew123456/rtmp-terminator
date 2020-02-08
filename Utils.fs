@@ -102,6 +102,20 @@ let be_bytes_to_double (slice: System.ArraySegment<byte>) =
     System.BitConverter.Int64BitsToDouble(be_bytes_to_int64 slice)
 
 /// <summary>
+/// Converts a 64-bit unsigned integer into big-endian bytes
+/// </summary>
+let uint64_to_be_bytes (value: uint64) (slice: System.ArraySegment<byte>) =
+    let mutable slicem = slice
+    slicem.[0] <- uint8 <| ((value >>> 56) &&& 0xFFUL)
+    slicem.[1] <- uint8 <| ((value >>> 48) &&& 0xFFUL)
+    slicem.[2] <- uint8 <| ((value >>> 40) &&& 0xFFUL)
+    slicem.[3] <- uint8 <| ((value >>> 32) &&& 0xFFUL)
+    slicem.[4] <- uint8 <| ((value >>> 24) &&& 0xFFUL)
+    slicem.[5] <- uint8 <| ((value >>> 16) &&& 0xFFUL)
+    slicem.[6] <- uint8 <| ((value >>> 8) &&& 0xFFUL)
+    slicem.[7] <- uint8 <| (value &&& 0xFFUL)
+
+/// <summary>
 /// Converts a 32-bit unsigned integer into big-endian bytes
 /// </summary>
 let uint32_to_be_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
@@ -119,6 +133,20 @@ let uint24_to_be_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
     slicem.[0] <- uint8 <| ((value <<< 16) &&& 0xFFu)
     slicem.[1] <- uint8 <| ((value <<< 8) &&& 0xFFu)
     slicem.[2] <- uint8 <| (value &&& 0xFFu)
+
+/// <summary>
+/// Converts a 24-bit unsigned integer into big-endian bytes
+/// </summary>
+let uint16_to_be_bytes (value: uint16) (slice: System.ArraySegment<byte>) =
+    let mutable slicem = slice
+    slicem.[0] <- uint8 <| ((value <<< 8) &&& 0xFFus)
+    slicem.[1] <- uint8 <| (value &&& 0xFFus)
+
+/// <summary>
+/// Converts a 64-bit double into big-endian bytes
+/// </summary>
+let double_to_be_bytes (value: double) (slice: System.ArraySegment<byte>) =
+    uint64_to_be_bytes (uint64 (System.BitConverter.DoubleToInt64Bits(value))) slice
 
 /// <summary>
 /// Generates a byte array containing random bytes

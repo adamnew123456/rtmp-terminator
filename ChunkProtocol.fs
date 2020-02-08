@@ -149,6 +149,7 @@ type ChunkEvents<'state> = {
 /// </summary>
 type ConnectionState<'userdata> = {
     Streams: Map<uint32, ChunkState>
+    NextMessageStream: uint32
     Socket: Socket
     Timeout: int32
     Callbacks: ChunkEvents<'userdata>
@@ -442,6 +443,10 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
     let process_full_message stream_id conn =
         let stream_state = get_stream stream_id conn
         let message_bytes = materialize_full_message stream_state.Buffer
+
+        let stream_state = {stream_state with Buffer=[]}
+        let conn = set_stream stream_id stream_state conn
+
         match stream_state.MessageType with
         | SetChunkSize ->
             let chunk_size = min 0xFFFFFFu (be_bytes_to_uint32 (full_slice message_bytes))
@@ -487,8 +492,74 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (AMFZero.StringVal command) = cmd_context.Value
             let (AMFZero.NumberVal transaction) = txn_context.Value
 
-            invoke_callback (conn.Callbacks.OnAMFZeroMessage (command, uint32 transaction, param_context.Value))
-                            conn
+            let conn =
+                invoke_callback (conn.Callbacks.OnAMFZeroMessage (command, uint32 transaction, param_context.Value))
+                                conn
+
+            match command with
+            | "connect" ->
+                // 2 bytes event type + 4 bvtes new stream id
+                // Max 27 bytes for AMF0 response content
+                let event_header = {
+                    ChunkStreamId=2u
+                    Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                    MessageRemaining=6u
+                    MessageHeader=FullHeader
+                    MessageType=UserControl
+                    MessageStreamId=0u
+                }
+
+                let new_stream = conn.NextMessageStream
+                let conn = {conn with NextMessageStream=new_stream + 1u}
+
+                let (connect_reply_buffer: uint8 array) = Array.zeroCreate 100
+                let mutable reply_slice = full_slice connect_reply_buffer
+
+                uint16_to_be_bytes 0us reply_slice
+                reply_slice <- reply_slice.Slice(2)
+
+                uint32_to_be_bytes new_stream reply_slice
+                reply_slice <- reply_slice.Slice(4)
+
+                reply_slice <- AMFZero.encode reply_slice (AMFZero.StringVal "_result")
+                reply_slice <- AMFZero.encode reply_slice (AMFZero.NumberVal (double 1))
+                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
+                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
+
+                let result_header = {
+                    ChunkStreamId=2u
+                    Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                    MessageRemaining=uint32 (reply_slice.Offset - 6)
+                    MessageHeader=FullHeader
+                    MessageType=CommandAMF0
+                    MessageStreamId=0u
+                }
+
+                let result_length = reply_slice.Offset - 6
+
+                conn
+                |> enqueue_reply (ChunkData (event_header, range_slice connect_reply_buffer 0 6))
+                |> enqueue_reply (ChunkData (result_header, range_slice connect_reply_buffer 6 result_length))
+
+            | _ ->
+                let (rpc_reply_buffer: uint8 array) = Array.zeroCreate 4096
+                let mutable reply_slice = full_slice rpc_reply_buffer
+                reply_slice <- AMFZero.encode reply_slice (AMFZero.StringVal command)
+                reply_slice <- AMFZero.encode reply_slice (AMFZero.NumberVal transaction)
+                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
+                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
+
+                let result_header = {
+                    ChunkStreamId=2u
+                    Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                    MessageRemaining=uint32 reply_slice.Offset
+                    MessageHeader=FullHeader
+                    MessageType=CommandAMF0
+                    MessageStreamId=0u
+                }
+
+                conn
+                |> enqueue_reply (ChunkData (result_header, range_slice rpc_reply_buffer 0 reply_slice.Offset))
 
         | _ ->
             conn
@@ -719,6 +790,7 @@ let chunk_protocol (connection: Socket) (events: ChunkEvents<_>) =
     let user_data = events.InitialState ()
     let connection_state = {
         Streams=Map.empty
+        NextMessageStream=3u
         Socket=connection
         Timeout=60 * 1000
         Callbacks=events
