@@ -81,7 +81,7 @@ let callbacks = {
         printf "SetPeerBandwidth(%d, %d)\n" size ltype
 
     OnAMFZeroMessage = fun (command, txn, value) () ->
-        printf "AMFZeroMessage()\n\tcommand = %s\n\ttxn = %d\n\tparams = %A\n" command txn value
+        printf "AMFZeroMessage()\n\tcommand = %s\n\ttxn = %f\n\tparams = %A\n" command txn value
 }
 
 [<EntryPoint>]

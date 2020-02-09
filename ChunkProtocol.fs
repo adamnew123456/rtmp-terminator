@@ -7,7 +7,7 @@ type Timestamp = uint32
 /// <summary>
 /// The default value used for the window acknowledgment size
 /// </summary>
-let window_size_def = 4096u
+let window_size_def = uint32 (64 * 1024)
 
 /// <summary>
 /// The default value used for chunk size
@@ -141,7 +141,7 @@ type ChunkEvents<'state> = {
     OnUserControl: System.ArraySegment<uint8> -> 'state -> 'state
     OnWindowAckSize: uint32 -> 'state -> 'state
     OnSetPeerBandwidth: uint32 -> uint8 -> 'state -> 'state
-    OnAMFZeroMessage: (string * uint32 * AMFZero.ValueType) -> 'state -> 'state
+    OnAMFZeroMessage: (string * double * AMFZero.ValueContext list) -> 'state -> 'state
 }
 
 /// <summary>
@@ -155,7 +155,8 @@ type ConnectionState<'userdata> = {
     Callbacks: ChunkEvents<'userdata>
     UserData: 'userdata
     TimestampEpoch: uint64
-    MessageBuffer: uint8 array
+    InputBuffer: uint8 array
+    OutputBuffer: System.ArraySegment<uint8>
     ChunkSize: uint32
     AckWindow: RolloverCounter
     OutputQueue: RtmpChunkMessage list
@@ -205,10 +206,22 @@ let invoke_callback (cb: 'userdata -> 'userdata) (conn: ConnectionState<'userdat
     {conn with UserData=cb conn.UserData}
 
 /// <summary>
+/// Updates the connection's output buffer pointer
+/// </summary>
+let advance_output_buffer (slice: System.ArraySegment<uint8>) (conn: ConnectionState<'userdata>) =
+    {conn with OutputBuffer=slice}
+
+/// <summary>
+/// Resets the connection's output buffer pointer
+/// </summary>
+let reset_output_buffer (conn: ConnectionState<'userdata>) =
+    {conn with OutputBuffer=full_slice conn.OutputBuffer.Array}
+
+/// <summary>
 /// Reads a basic chunk header and returns the header type and chunk stream id
 /// </summary>
 let read_basic_header (conn: ConnectionState<_>) =
-    let read_slice = range_slice conn.MessageBuffer 0 1
+    let read_slice = range_slice conn.InputBuffer 0 1
 
     // 5.3.1.1
 
@@ -218,7 +231,7 @@ let read_basic_header (conn: ConnectionState<_>) =
             (header_type, 64u + uint32 bytes.[0]))
 
     let read_three_byte_csid header_type =
-        let ext_read_slice = range_slice conn.MessageBuffer 0 2
+        let ext_read_slice = range_slice conn.InputBuffer 0 2
         read_net_bytes conn.Socket ext_read_slice conn.Timeout
         |> Result.map (fun bytes ->
             let stream_id = (256u * uint32 bytes.[1]) + uint32 bytes.[0] + 64u
@@ -245,7 +258,7 @@ let read_message_header (conn: ConnectionState<_>)
                         (ty: MessageHeaderType)
                         (stream_id: uint32) =
     let read_extended_timestamp () =
-        let read_slice = range_slice conn.MessageBuffer 0 4
+        let read_slice = range_slice conn.InputBuffer 0 4
         read_net_bytes conn.Socket read_slice conn.Timeout
         |> Result.map be_bytes_to_uint32
 
@@ -303,17 +316,17 @@ let read_message_header (conn: ConnectionState<_>)
 
     match ty with
     | FullHeader ->
-        let read_slice = range_slice conn.MessageBuffer 0 11
+        let read_slice = range_slice conn.InputBuffer 0 11
         read_net_bytes conn.Socket read_slice conn.Timeout
         |> Result.bind read_full_header
 
     | ShareStream ->
-        let read_slice = range_slice conn.MessageBuffer 0 7
+        let read_slice = range_slice conn.InputBuffer 0 7
         read_net_bytes conn.Socket read_slice conn.Timeout
         |> Result.bind read_sharestream_header
 
     | DeltaTimestamp ->
-        let read_slice = range_slice conn.MessageBuffer 0 3
+        let read_slice = range_slice conn.InputBuffer 0 3
         read_net_bytes conn.Socket read_slice conn.Timeout
         |> Result.bind read_deltatimestamp_header
 
@@ -324,26 +337,26 @@ let read_message_header (conn: ConnectionState<_>)
 /// Sends a single message to the client
 /// </summary>
 let send_single_message (conn: ConnectionState<_>) (msg: RtmpChunkMessage) =
-    let mutable packet_slice = full_slice conn.MessageBuffer
+    let mutable packet_slice = conn.OutputBuffer
     let conn = invoke_callback (conn.Callbacks.OnMessageSent msg) conn
 
     match msg with
     | Handshake1 version ->
         packet_slice.[0] <- uint8 version
-        net_send_bytes conn.Socket (range_slice conn.MessageBuffer 0 1)
+        net_send_bytes conn.Socket (packet_slice.Slice(0, 1))
         conn
 
     | Handshake2 handshake ->
         uint32_to_be_bytes handshake.InitTimestamp packet_slice
         uint32_to_be_bytes 0u (packet_slice.Slice(4))
-        net_send_bytes conn.Socket (range_slice conn.MessageBuffer 0 8)
+        net_send_bytes conn.Socket (packet_slice.Slice(0, 8))
         net_send_bytes conn.Socket handshake.RandomData
         conn
 
     | Handshake3 handshake ->
         uint32_to_be_bytes handshake.AckTimestamp packet_slice
         uint32_to_be_bytes handshake.ReadTimestamp (packet_slice.Slice(4))
-        net_send_bytes conn.Socket (range_slice conn.MessageBuffer 0 8)
+        net_send_bytes conn.Socket (packet_slice.Slice(0, 8))
         net_send_bytes conn.Socket handshake.AckRandomData
         conn
 
@@ -351,6 +364,7 @@ let send_single_message (conn: ConnectionState<_>) (msg: RtmpChunkMessage) =
         // Write a Type 0 header regardless of the contents of the header
         // value. This avoids the need to track any information on the
         // previous messages we sent.
+        let packet_start = packet_slice
         if header.ChunkStreamId < 63u then
             packet_slice.[0] <- uint8 header.ChunkStreamId
             packet_slice <- packet_slice.Slice(1)
@@ -388,7 +402,8 @@ let send_single_message (conn: ConnectionState<_>) (msg: RtmpChunkMessage) =
             uint32_to_be_bytes header.Timestamp packet_slice
             packet_slice <- packet_slice.Slice(4)
 
-        net_send_bytes conn.Socket (range_slice conn.MessageBuffer 0 packet_slice.Offset)
+        let packet_length = packet_slice.Offset - packet_start.Offset
+        net_send_bytes conn.Socket (packet_start.Slice(0, packet_length))
         net_send_bytes conn.Socket contents
         conn
 
@@ -440,6 +455,205 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
 
         chunk_bytes
 
+    let process_command name transaction last_param msg_len stream_id conn =
+        match name with
+        | "connect" ->
+            let (info_end, info_context) = AMFZero.parse last_param
+            let (_, extra_context) =
+                if info_end.Offset < msg_len then
+                    AMFZero.parse info_end
+                else
+                    (info_end, {Value=AMFZero.NullVal; Context=Map.empty})
+
+            let callback =
+                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context; extra_context])
+            let conn = invoke_callback callback conn
+
+            let window_size_slice = conn.OutputBuffer.Slice(0, 4)
+            let window_size_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=4u
+                MessageHeader=FullHeader
+                MessageType=WindowAckSize
+                MessageStreamId=0u
+            }
+
+            uint32_to_be_bytes window_size_def window_size_slice
+
+            let chunk_size_slice = conn.OutputBuffer.Slice(4, 4)
+            let chunk_size_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=4u
+                MessageHeader=FullHeader
+                MessageType=SetChunkSize
+                MessageStreamId=0u
+            }
+
+            uint32_to_be_bytes (60u * 1024u) chunk_size_slice
+
+
+            let mutable bandwidth_size_slice = conn.OutputBuffer.Slice(8, 5)
+            let peer_bandwidth_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=5u
+                MessageHeader=FullHeader
+                MessageType=SetPeerBandwidth
+                MessageStreamId=0u
+            }
+
+            uint32_to_be_bytes (60u * 1024u) bandwidth_size_slice
+            bandwidth_size_slice.[4] <- 0uy
+
+            let event_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=6u
+                MessageHeader=FullHeader
+                MessageType=UserControl
+                MessageStreamId=0u
+            }
+
+            let new_stream = conn.NextMessageStream
+            let conn = {conn with NextMessageStream=new_stream + 1u}
+
+            let event_start = conn.OutputBuffer.Slice(13)
+            uint16_to_be_bytes 0us event_start
+            uint32_to_be_bytes new_stream (event_start.Slice(2))
+
+            conn
+            |> enqueue_reply (ChunkData (chunk_size_header, chunk_size_slice))
+            |> enqueue_reply (ChunkData (window_size_header, window_size_slice))
+            |> enqueue_reply (ChunkData (peer_bandwidth_header, bandwidth_size_slice))
+            |> advance_output_buffer (conn.OutputBuffer.Slice(13))
+
+            let reply_start = event_start.Slice(6)
+            let reply_end = AMFZero.encode reply_start (AMFZero.StringVal "_result")
+            let reply_end = AMFZero.encode reply_end (AMFZero.NumberVal transaction)
+            let reply_end = AMFZero.encode reply_end AMFZero.NullVal
+            let reply_end = AMFZero.encode reply_end AMFZero.NullVal
+
+            let reply_length = reply_end.Offset - reply_start.Offset
+            let reply_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=uint32 reply_length
+                MessageHeader=FullHeader
+                MessageType=CommandAMF0
+                MessageStreamId=0u
+            }
+
+            conn
+            |> enqueue_reply (ChunkData (window_size_header, window_size_slice))
+            |> enqueue_reply (ChunkData (chunk_size_header, chunk_size_slice))
+            |> enqueue_reply (ChunkData (peer_bandwidth_header, bandwidth_size_slice))
+            |> enqueue_reply (ChunkData (event_header, event_start.Slice(0, 6)))
+            |> enqueue_reply (ChunkData (reply_header, reply_start.Slice(0, reply_length)))
+            |> advance_output_buffer reply_end
+
+        | "createStream" ->
+            let (_, info_context) = AMFZero.parse last_param
+
+            let callback =
+                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context])
+            let conn = invoke_callback callback conn
+
+            let new_stream = conn.NextMessageStream
+            let conn = {conn with NextMessageStream=new_stream + 1u}
+
+            let reply_start = conn.OutputBuffer
+            let reply_end = AMFZero.encode reply_start (AMFZero.StringVal "_result")
+            let reply_end = AMFZero.encode reply_end (AMFZero.NumberVal transaction)
+            let reply_end = AMFZero.encode reply_end AMFZero.NullVal
+            let reply_end = AMFZero.encode reply_end (AMFZero.NumberVal (double new_stream))
+
+            let reply_length = reply_end.Offset - reply_start.Offset
+            let reply_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=uint32 reply_length
+                MessageHeader=FullHeader
+                MessageType=CommandAMF0
+                MessageStreamId=0u
+            }
+
+            conn
+            |> enqueue_reply (ChunkData (reply_header, reply_start.Slice(0, reply_length)))
+            |> advance_output_buffer reply_end
+
+        | "deleteStream" ->
+            // The client doesn't require a response to this, so it's currently a no-op
+            let (info_end, info_context) = AMFZero.parse last_param
+            let (_, stream_id_context) = AMFZero.parse info_end
+
+            let callback =
+                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context; stream_id_context])
+            invoke_callback callback conn
+
+        | "publish" ->
+            let (info_end, info_context) = AMFZero.parse last_param
+            let (pub_name_end, pub_name_context) = AMFZero.parse info_end
+            let (_, pub_type_context) = AMFZero.parse pub_name_end
+
+            let callback =
+                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context; pub_name_context; pub_type_context])
+            let conn = invoke_callback callback conn
+
+            let reply_start = conn.OutputBuffer
+            let reply_end = AMFZero.encode reply_start (AMFZero.StringVal "onStatus")
+            let reply_end = AMFZero.encode reply_end (AMFZero.NumberVal 0.0)
+            let reply_end = AMFZero.encode reply_end AMFZero.NullVal
+
+            let status_info = AMFZero.ObjectVal (Map.ofList [
+                "level", AMFZero.StringVal "status"
+                "code", AMFZero.StringVal "NetStream.Publish.Start"
+                "description", AMFZero.StringVal "Stream started"
+            ])
+            let reply_end = AMFZero.encode reply_end status_info
+
+            let reply_length = reply_end.Offset - reply_start.Offset
+            let result_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=uint32 reply_length
+                MessageHeader=FullHeader
+                MessageType=CommandAMF0
+                MessageStreamId=0u
+            }
+
+            conn
+            |> enqueue_reply (ChunkData (result_header, reply_start.Slice(0, reply_length)))
+            |> advance_output_buffer reply_end
+
+        | _ ->
+            let (_, info_context) = AMFZero.parse last_param
+
+            let callback =
+                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context])
+            let conn = invoke_callback callback conn
+
+            let reply_start = conn.OutputBuffer
+            let reply_end = AMFZero.encode reply_start (AMFZero.StringVal name)
+            let reply_end = AMFZero.encode reply_end (AMFZero.NumberVal transaction)
+            let reply_end = AMFZero.encode reply_end AMFZero.NullVal
+            let reply_end = AMFZero.encode reply_end AMFZero.NullVal
+
+            let reply_length = reply_end.Offset - reply_start.Offset
+            let result_header = {
+                ChunkStreamId=2u
+                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
+                MessageRemaining=uint32 reply_length
+                MessageHeader=FullHeader
+                MessageType=CommandAMF0
+                MessageStreamId=0u
+            }
+
+            conn
+            |> enqueue_reply (ChunkData (result_header, reply_start.Slice(0, reply_length)))
+            |> advance_output_buffer reply_end
+
     let process_full_message stream_id conn =
         let stream_state = get_stream stream_id conn
         let message_bytes = materialize_full_message stream_state.Buffer
@@ -487,79 +701,10 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
         | CommandAMF0 ->
             let (cmd_end, cmd_context) = AMFZero.parse (full_slice message_bytes)
             let (txn_end, txn_context) = AMFZero.parse cmd_end
-            let (_, param_context) = AMFZero.parse txn_end
 
             let (AMFZero.StringVal command) = cmd_context.Value
             let (AMFZero.NumberVal transaction) = txn_context.Value
-
-            let conn =
-                invoke_callback (conn.Callbacks.OnAMFZeroMessage (command, uint32 transaction, param_context.Value))
-                                conn
-
-            match command with
-            | "connect" ->
-                // 2 bytes event type + 4 bvtes new stream id
-                // Max 27 bytes for AMF0 response content
-                let event_header = {
-                    ChunkStreamId=2u
-                    Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
-                    MessageRemaining=6u
-                    MessageHeader=FullHeader
-                    MessageType=UserControl
-                    MessageStreamId=0u
-                }
-
-                let new_stream = conn.NextMessageStream
-                let conn = {conn with NextMessageStream=new_stream + 1u}
-
-                let (connect_reply_buffer: uint8 array) = Array.zeroCreate 100
-                let mutable reply_slice = full_slice connect_reply_buffer
-
-                uint16_to_be_bytes 0us reply_slice
-                reply_slice <- reply_slice.Slice(2)
-
-                uint32_to_be_bytes new_stream reply_slice
-                reply_slice <- reply_slice.Slice(4)
-
-                reply_slice <- AMFZero.encode reply_slice (AMFZero.StringVal "_result")
-                reply_slice <- AMFZero.encode reply_slice (AMFZero.NumberVal (double 1))
-                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
-                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
-
-                let result_header = {
-                    ChunkStreamId=2u
-                    Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
-                    MessageRemaining=uint32 (reply_slice.Offset - 6)
-                    MessageHeader=FullHeader
-                    MessageType=CommandAMF0
-                    MessageStreamId=0u
-                }
-
-                let result_length = reply_slice.Offset - 6
-
-                conn
-                |> enqueue_reply (ChunkData (event_header, range_slice connect_reply_buffer 0 6))
-                |> enqueue_reply (ChunkData (result_header, range_slice connect_reply_buffer 6 result_length))
-
-            | _ ->
-                let (rpc_reply_buffer: uint8 array) = Array.zeroCreate 4096
-                let mutable reply_slice = full_slice rpc_reply_buffer
-                reply_slice <- AMFZero.encode reply_slice (AMFZero.StringVal command)
-                reply_slice <- AMFZero.encode reply_slice (AMFZero.NumberVal transaction)
-                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
-                reply_slice <- AMFZero.encode reply_slice AMFZero.NullVal
-
-                let result_header = {
-                    ChunkStreamId=2u
-                    Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
-                    MessageRemaining=uint32 reply_slice.Offset
-                    MessageHeader=FullHeader
-                    MessageType=CommandAMF0
-                    MessageStreamId=0u
-                }
-
-                conn
-                |> enqueue_reply (ChunkData (result_header, range_slice rpc_reply_buffer 0 reply_slice.Offset))
+            process_command command transaction txn_end message_bytes.Length stream_id conn
 
         | _ ->
             conn
@@ -583,9 +728,11 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
                     MessageStreamId=0u
                 }
 
-                let ack_reply = full_slice (Array.zeroCreate 4)
-                uint32_to_be_bytes (seq_rcounter ack_window) ack_reply
-                enqueue_reply (ChunkData (ack_header, ack_reply)) conn
+                uint32_to_be_bytes (seq_rcounter ack_window) conn.OutputBuffer
+
+                conn
+                |> enqueue_reply (ChunkData (ack_header, conn.OutputBuffer.Slice(0, 4)))
+                |> advance_output_buffer (conn.OutputBuffer.Slice(4))
             else
                 conn
 
@@ -597,6 +744,15 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             not (List.isEmpty stream_state.Buffer)
             && stream_state.MessageRemaining = 0u
 
+        let stream_state =
+            if is_full_message then
+                // Assume that the next message will be the same size unless the
+                // next header tells us different
+                let buffer_size = List.sumBy Array.length stream_state.Buffer
+                {stream_state with MessageRemaining=uint32 buffer_size}
+            else
+                stream_state
+
         let conn =
             {conn with AckWindow=ack_window}
             |> set_stream stream_id stream_state
@@ -607,48 +763,17 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             else
                 conn
 
-        let conn =
-            List.rev conn.OutputQueue
-            |> List.fold send_single_message conn
+        try
+            let conn =
+                List.rev conn.OutputQueue
+                |> List.fold send_single_message conn
 
-        {conn with OutputQueue=[]}
-
-    // Prepare the initial chunk and window size assignment if this is the
-    // first client message we're processing
-    let conn =
-        if conn.AckWindow.Current = 0u && conn.AckWindow.TimesFilled = 0u then
-            // 4 bytes of chunk size
-            // 4 bytes of window ack size
-            let (init_send_buffer: uint8 array) = Array.zeroCreate 8
-            let chunk_size_slice = range_slice init_send_buffer 0 4
-            let window_size_slice = range_slice init_send_buffer 4 4
-
-            let chunk_size_header = {
-                ChunkStreamId=2u
-                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
-                MessageRemaining=4u
-                MessageHeader=FullHeader
-                MessageType=SetChunkSize
-                MessageStreamId=0u
-            }
-
-            let window_size_header = {
-                ChunkStreamId=2u
-                Timestamp=uint32 (unix_time_ms () - conn.TimestampEpoch)
-                MessageRemaining=4u
-                MessageHeader=FullHeader
-                MessageType=WindowAckSize
-                MessageStreamId=0u
-            }
-
-            uint32_to_be_bytes (60u * 1024u * 1024u) chunk_size_slice
-            uint32_to_be_bytes window_size_def window_size_slice
-
-            conn
-            |> enqueue_reply (ChunkData (chunk_size_header, chunk_size_slice))
-            |> enqueue_reply (ChunkData (window_size_header, window_size_slice))
-        else
-            conn
+            {conn with OutputQueue=[]}
+            |> reset_output_buffer
+            |> Result.Ok
+        with
+        | :? System.Net.Sockets.SocketException as err ->
+            Result.Error err.Message
 
     let read_result =
         read_basic_header conn
@@ -670,10 +795,10 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
           let stream_state = {stream_state with MessageRemaining=msg_left}
           let conn = set_stream stream_id stream_state conn
 
-          let read_slice = range_slice conn.MessageBuffer 0 (int data_size)
+          let read_slice = range_slice conn.InputBuffer 0 (int data_size)
           read_net_bytes conn.Socket read_slice conn.Timeout
           |> Result.map (fun bytes -> (bytes, stream_id, header_info, conn)))
-        |> Result.map process_chunk_bytes
+        |> Result.bind process_chunk_bytes
 
     match read_result with
     | Result.Ok conn ->
@@ -691,7 +816,7 @@ let ack_handshake_state (conn: ConnectionState<_>)
                         (server_time: uint32)
                         (server_random: uint8 array) =
     // Section 5.2.4
-    let read_slice = range_slice conn.MessageBuffer 0 1536
+    let read_slice = range_slice conn.InputBuffer 0 1536
     match read_net_bytes conn.Socket read_slice conn.Timeout with
     | Result.Ok bytes ->
         let ack_time = be_bytes_to_uint32 bytes
@@ -723,7 +848,7 @@ let ack_handshake_state (conn: ConnectionState<_>)
 /// </summary>
 let client_handshake2_state (conn: ConnectionState<_>) =
     // Section 5.2.3
-    let read_slice = range_slice conn.MessageBuffer 0 1536
+    let read_slice = range_slice conn.InputBuffer 0 1536
     match read_net_bytes conn.Socket read_slice conn.Timeout with
     | Result.Ok bytes ->
         let recv_timestamp = uint32 (unix_time_ms () - conn.TimestampEpoch)
@@ -767,7 +892,7 @@ let client_handshake2_state (conn: ConnectionState<_>) =
 /// </summary>
 let client_handshake1_state (conn: ConnectionState<_>) =
     // Section 5.2.2
-    let read_slice = range_slice conn.MessageBuffer 0 1
+    let read_slice = range_slice conn.InputBuffer 0 1
     match read_net_bytes conn.Socket read_slice conn.Timeout with
     | Result.Ok bytes ->
         let message = Handshake1 bytes.[0]
@@ -797,7 +922,8 @@ let chunk_protocol (connection: Socket) (events: ChunkEvents<_>) =
         UserData=user_data
         TimestampEpoch=unix_time_ms ()
         // Must be at least 1536 bytes to fit handshakes
-        MessageBuffer=Array.zeroCreate (64 * 1024 * 1024)
+        InputBuffer=Array.zeroCreate (64 * 1024 * 1024)
+        OutputBuffer=full_slice (Array.zeroCreate (64 * 1024 * 1024))
         ChunkSize=chunk_size_def
         AckWindow={
             Current=0u
