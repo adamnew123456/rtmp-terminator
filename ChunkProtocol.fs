@@ -253,7 +253,7 @@ let read_message_header (conn: ConnectionState<_>)
         let timestamp = be_bytes_to_uint24 bytes
         let msg_length = be_bytes_to_uint24 (bytes.Slice(3))
         let msg_type = Map.find bytes.[6] message_type_map
-        let msg_stream = be_bytes_to_uint32 (bytes.Slice(7))
+        let msg_stream = le_bytes_to_uint32 (bytes.Slice(7))
         if timestamp = 0xFFFFFFu then
             read_extended_timestamp ()
             |> Result.map (fun ext_timestamp ->
@@ -381,7 +381,7 @@ let send_single_message (conn: ConnectionState<_>) (msg: RtmpChunkMessage) =
         packet_slice.[0] <- inverse_find header.MessageType message_type_map
 
         packet_slice <- packet_slice.Slice(1)
-        uint32_to_be_bytes header.MessageStreamId packet_slice
+        uint32_to_le_bytes header.MessageStreamId packet_slice
 
         packet_slice <- packet_slice.Slice(4)
         if ext_timestamp then

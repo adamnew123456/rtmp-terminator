@@ -59,13 +59,13 @@ let be_bytes_to_int64 (slice: System.ArraySegment<byte>) =
     let lsb = uint64 slice.[7]
 
     (msb <<< 56)
-    + (msb_1 <<< 48)
-    + (msb_2 <<< 40)
-    + (msb_3 <<< 32)
-    + (lsb_3 <<< 24)
-    + (lsb_2 <<< 16)
-    + (lsb_1 <<< 8)
-    + lsb
+    ||| (msb_1 <<< 48)
+    ||| (msb_2 <<< 40)
+    ||| (msb_3 <<< 32)
+    ||| (lsb_3 <<< 24)
+    ||| (lsb_2 <<< 16)
+    ||| (lsb_1 <<< 8)
+    ||| lsb
     |> int64
 
 /// <summary>
@@ -76,7 +76,17 @@ let be_bytes_to_uint32 (slice: System.ArraySegment<byte>) =
     let msb_1 = uint32 slice.[1]
     let msb_2 = uint32 slice.[2]
     let lsb = uint32 slice.[3]
-    (msb <<< 24) + (msb_1 <<< 16) + (msb_2 <<< 8) + lsb
+    (msb <<< 24) ||| (msb_1 <<< 16) ||| (msb_2 <<< 8) ||| lsb
+
+/// <summary>
+/// Converts bytes into a little-endian 32-bit unsigned integer
+/// </summary>
+let le_bytes_to_uint32 (slice: System.ArraySegment<byte>) =
+    let lsb = uint32 slice.[0]
+    let msb_2 = uint32 slice.[1]
+    let msb_1 = uint32 slice.[2]
+    let msb = uint32 slice.[3]
+    (msb <<< 24) ||| (msb_1 <<< 16) ||| (msb_2 <<< 8) ||| lsb
 
 /// <summary>
 /// Converts bytes into a big-endian 24-bit unsigned integer
@@ -85,7 +95,7 @@ let be_bytes_to_uint24 (slice: System.ArraySegment<byte>) =
     let msb = uint32 slice.[0]
     let mid = uint32 slice.[1]
     let lsb = uint32 slice.[2]
-    (msb <<< 16) + (mid <<< 8) + lsb
+    (msb <<< 16) ||| (mid <<< 8) ||| lsb
 
 /// <summary>
 /// Converts bytes into a big-endian 16-bit unsigned integer
@@ -93,7 +103,7 @@ let be_bytes_to_uint24 (slice: System.ArraySegment<byte>) =
 let be_bytes_to_uint16 (slice: System.ArraySegment<byte>) =
     let msb = uint16 slice.[0]
     let lsb = uint16 slice.[1]
-    (msb <<< 8) + lsb
+    (msb <<< 8) ||| lsb
 
 /// <summary>
 /// Converts bytes into a big-endian 64-bit double
@@ -124,6 +134,16 @@ let uint32_to_be_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
     slicem.[1] <- uint8 <| ((value >>> 16) &&& 0xFFu)
     slicem.[2] <- uint8 <| ((value >>> 8) &&& 0xFFu)
     slicem.[3] <- uint8 <| (value &&& 0xFFu)
+
+/// <summary>
+/// Converts a 32-bit unsigned integer into little-endian bytes
+/// </summary>
+let uint32_to_le_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
+    let mutable slicem = slice
+    slicem.[3] <- uint8 <| (value >>> 24)
+    slicem.[2] <- uint8 <| ((value >>> 16) &&& 0xFFu)
+    slicem.[1] <- uint8 <| ((value >>> 8) &&& 0xFFu)
+    slicem.[0] <- uint8 <| (value &&& 0xFFu)
 
 /// <summary>
 /// Converts a 24-bit unsigned integer into big-endian bytes
