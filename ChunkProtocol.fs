@@ -7,7 +7,7 @@ type Timestamp = uint32
 /// <summary>
 /// The default value used for the window acknowledgment size
 /// </summary>
-let window_size_def = uint32 (64 * 1024)
+let window_size_def = uint32 (30 * 1024)
 
 /// <summary>
 /// The default value used for chunk size
@@ -141,7 +141,10 @@ type ChunkEvents<'state> = {
     OnUserControl: System.ArraySegment<uint8> -> 'state -> 'state
     OnWindowAckSize: uint32 -> 'state -> 'state
     OnSetPeerBandwidth: uint32 -> uint8 -> 'state -> 'state
-    OnAMFZeroMessage: (string * double * AMFZero.ValueContext list) -> 'state -> 'state
+    OnAMFZeroCommand: (string * double * AMFZero.ValueContext list) -> 'state -> 'state
+    OnAMFZeroData: (string * AMFZero.ValueContext list) -> 'state -> 'state
+    OnVideoData: uint8 array -> 'state -> 'state
+    OnAudioData: uint8 array -> 'state -> 'state
 }
 
 /// <summary>
@@ -458,15 +461,8 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
     let process_command name transaction last_param msg_len stream_id conn =
         match name with
         | "connect" ->
-            let (info_end, info_context) = AMFZero.parse last_param
-            let (_, extra_context) =
-                if info_end.Offset < msg_len then
-                    AMFZero.parse info_end
-                else
-                    (info_end, {Value=AMFZero.NullVal; Context=Map.empty})
-
-            let callback =
-                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context; extra_context])
+            let extra_context = AMFZero.parse_all last_param (msg_len - last_param.Offset)
+            let callback = conn.Callbacks.OnAMFZeroCommand (name, transaction, extra_context)
             let conn = invoke_callback callback conn
 
             let window_size_slice = conn.OutputBuffer.Slice(0, 4)
@@ -491,8 +487,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
                 MessageStreamId=0u
             }
 
-            uint32_to_be_bytes (60u * 1024u) chunk_size_slice
-
+            uint32_to_be_bytes (32u * 1024u) chunk_size_slice
 
             let mutable bandwidth_size_slice = conn.OutputBuffer.Slice(8, 5)
             let peer_bandwidth_header = {
@@ -504,7 +499,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
                 MessageStreamId=0u
             }
 
-            uint32_to_be_bytes (60u * 1024u) bandwidth_size_slice
+            uint32_to_be_bytes (64u * 1024u) bandwidth_size_slice
             bandwidth_size_slice.[4] <- 0uy
 
             let event_header = {
@@ -522,12 +517,6 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let event_start = conn.OutputBuffer.Slice(13)
             uint16_to_be_bytes 0us event_start
             uint32_to_be_bytes new_stream (event_start.Slice(2))
-
-            conn
-            |> enqueue_reply (ChunkData (chunk_size_header, chunk_size_slice))
-            |> enqueue_reply (ChunkData (window_size_header, window_size_slice))
-            |> enqueue_reply (ChunkData (peer_bandwidth_header, bandwidth_size_slice))
-            |> advance_output_buffer (conn.OutputBuffer.Slice(13))
 
             let reply_start = event_start.Slice(6)
             let reply_end = AMFZero.encode reply_start (AMFZero.StringVal "_result")
@@ -557,7 +546,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (_, info_context) = AMFZero.parse last_param
 
             let callback =
-                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context])
+                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context])
             let conn = invoke_callback callback conn
 
             let new_stream = conn.NextMessageStream
@@ -589,7 +578,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (_, stream_id_context) = AMFZero.parse info_end
 
             let callback =
-                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context; stream_id_context])
+                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context; stream_id_context])
             invoke_callback callback conn
 
         | "publish" ->
@@ -598,7 +587,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (_, pub_type_context) = AMFZero.parse pub_name_end
 
             let callback =
-                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context; pub_name_context; pub_type_context])
+                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context; pub_name_context; pub_type_context])
             let conn = invoke_callback callback conn
 
             let reply_start = conn.OutputBuffer
@@ -631,7 +620,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (_, info_context) = AMFZero.parse last_param
 
             let callback =
-                conn.Callbacks.OnAMFZeroMessage (name, transaction, [info_context])
+                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context])
             let conn = invoke_callback callback conn
 
             let reply_start = conn.OutputBuffer
@@ -705,6 +694,19 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (AMFZero.StringVal command) = cmd_context.Value
             let (AMFZero.NumberVal transaction) = txn_context.Value
             process_command command transaction txn_end message_bytes.Length stream_id conn
+
+        | DataAMF0 ->
+            let (handler_end, handler_context) = AMFZero.parse (full_slice message_bytes)
+            let arg_contexts = AMFZero.parse_all handler_end (message_bytes.Length - handler_end.Offset)
+
+            let (AMFZero.StringVal handler) = handler_context.Value
+            invoke_callback (conn.Callbacks.OnAMFZeroData (handler, arg_contexts)) conn
+
+        | VideoData ->
+            invoke_callback (conn.Callbacks.OnVideoData message_bytes) conn
+
+        | AudioData ->
+            invoke_callback (conn.Callbacks.OnAudioData message_bytes) conn
 
         | _ ->
             conn
@@ -922,8 +924,8 @@ let chunk_protocol (connection: Socket) (events: ChunkEvents<_>) =
         UserData=user_data
         TimestampEpoch=unix_time_ms ()
         // Must be at least 1536 bytes to fit handshakes
-        InputBuffer=Array.zeroCreate (64 * 1024 * 1024)
-        OutputBuffer=full_slice (Array.zeroCreate (64 * 1024 * 1024))
+        InputBuffer=Array.zeroCreate (32 * 1024)
+        OutputBuffer=full_slice (Array.zeroCreate (32 * 1024))
         ChunkSize=chunk_size_def
         AckWindow={
             Current=0u

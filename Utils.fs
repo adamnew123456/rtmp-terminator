@@ -150,8 +150,8 @@ let uint32_to_le_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
 /// </summary>
 let uint24_to_be_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
     let mutable slicem = slice
-    slicem.[0] <- uint8 <| ((value <<< 16) &&& 0xFFu)
-    slicem.[1] <- uint8 <| ((value <<< 8) &&& 0xFFu)
+    slicem.[0] <- uint8 <| ((value >>> 16) &&& 0xFFu)
+    slicem.[1] <- uint8 <| ((value >>> 8) &&& 0xFFu)
     slicem.[2] <- uint8 <| (value &&& 0xFFu)
 
 /// <summary>
@@ -159,7 +159,7 @@ let uint24_to_be_bytes (value: uint32) (slice: System.ArraySegment<byte>) =
 /// </summary>
 let uint16_to_be_bytes (value: uint16) (slice: System.ArraySegment<byte>) =
     let mutable slicem = slice
-    slicem.[0] <- uint8 <| ((value <<< 8) &&& 0xFFus)
+    slicem.[0] <- uint8 <| ((value >>> 8) &&& 0xFFus)
     slicem.[1] <- uint8 <| (value &&& 0xFFus)
 
 /// <summary>
@@ -256,3 +256,9 @@ let read_net_bytes (connection: Socket) (slice: System.ArraySegment<byte>) (time
 /// </summary>
 let net_send_bytes (connection: Socket) (slice: System.ArraySegment<byte>) =
     connection.Send(slice.Array, slice.Offset, slice.Count, SocketFlags.None) |> ignore
+
+/// <summary>
+/// Writes an array slice to a stream
+/// </summary>
+let stream_send_bytes (stream: System.IO.Stream) (slice: System.ArraySegment<uint8>) =
+    stream.Write(slice.Array, slice.Offset, slice.Count)

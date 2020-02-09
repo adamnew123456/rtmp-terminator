@@ -167,6 +167,20 @@ let parse (slice: System.ArraySegment<uint8>) =
     (slice, {Value=value; Context=refs})
 
 /// <summary>
+/// Parses AMF0 values until the slice has been exhausted
+/// </summary>
+let parse_all (slice: System.ArraySegment<uint8>) (length: int) =
+    let base_offset = slice.Offset
+    let rec parse_one (slice: System.ArraySegment<uint8>) contexts =
+        if slice.Offset - base_offset = length then
+            List.rev contexts
+        else
+            let (slice, context) = parse slice
+            parse_one slice (context :: contexts)
+
+    parse_one slice []
+
+/// <summary>
 /// Encodes a short string without any type prefix
 /// </summary>
 let encode_short_string (slice: System.ArraySegment<uint8>) (value: string) =
