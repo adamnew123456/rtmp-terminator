@@ -128,7 +128,7 @@ let main argv =
     server.Listen(10)
 
     let peer = server.Accept()
-    chunk_protocol peer callbacks
+    chunk_protocol peer
 
     server.Close()
 

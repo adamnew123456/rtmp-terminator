@@ -128,35 +128,13 @@ type ChunkState = {
 }
 
 /// <summary>
-/// Callbacks used when different events occur on the chunk session
-/// </summary>
-type ChunkEvents<'state> = {
-    InitialState: unit -> 'state
-    OnConnectionClose: string -> 'state -> 'state
-    OnMessageReceived: RtmpChunkMessage -> 'state -> 'state
-    OnMessageSent: RtmpChunkMessage -> 'state -> 'state
-    OnSetChunkSize: uint32 -> 'state -> 'state
-    OnAbort: 'state -> 'state
-    OnAcknowledge: uint32 -> 'state -> 'state
-    OnUserControl: System.ArraySegment<uint8> -> 'state -> 'state
-    OnWindowAckSize: uint32 -> 'state -> 'state
-    OnSetPeerBandwidth: uint32 -> uint8 -> 'state -> 'state
-    OnAMFZeroCommand: (string * double * AMFZero.ValueContext list) -> 'state -> 'state
-    OnAMFZeroData: (string * AMFZero.ValueContext list) -> 'state -> 'state
-    OnVideoData: uint8 array -> 'state -> 'state
-    OnAudioData: uint8 array -> 'state -> 'state
-}
-
-/// <summary>
 /// The full state used by the RTMP chunk processor
 /// </summary>
-type ConnectionState<'userdata> = {
+type ConnectionState = {
     Streams: Map<uint32, ChunkState>
     NextMessageStream: uint32
     Socket: Socket
     Timeout: int32
-    Callbacks: ChunkEvents<'userdata>
-    UserData: 'userdata
     TimestampEpoch: uint64
     InputBuffer: uint8 array
     OutputBuffer: System.ArraySegment<uint8>
@@ -180,19 +158,19 @@ let init_stream_state = {
 /// <summary>
 /// Retrieves the details for a particular chunk stream in a connection
 /// </summary>
-let get_stream (id: uint32) (conn: ConnectionState<_>) =
+let get_stream (id: uint32) (conn: ConnectionState) =
     Map.find id conn.Streams
 
 /// <summary>
 /// Updates the details for a particular chunk stream in a connection
 /// </summary>
-let set_stream (id: uint32) (stream: ChunkState) (conn: ConnectionState<_>) =
+let set_stream (id: uint32) (stream: ChunkState) (conn: ConnectionState) =
     {conn with Streams=Map.add id stream conn.Streams}
 
 /// <summary>
 /// Enqueues a new message to be sent to the client
 /// </summary>
-let enqueue_reply (msg: RtmpChunkMessage) (conn: ConnectionState<_>) =
+let enqueue_reply (msg: RtmpChunkMessage) (conn: ConnectionState) =
     {conn with OutputQueue=msg :: conn.OutputQueue}
 
 /// <summary>
@@ -202,28 +180,21 @@ let push_stream_buffer (buffer: uint8 array) (stream: ChunkState) =
     {stream with Buffer=buffer :: stream.Buffer}
 
 /// <summary>
-/// Invokes a callback on the connection, returning a connection with an
-/// updated user state
-/// </summary>
-let invoke_callback (cb: 'userdata -> 'userdata) (conn: ConnectionState<'userdata>) =
-    {conn with UserData=cb conn.UserData}
-
-/// <summary>
 /// Updates the connection's output buffer pointer
 /// </summary>
-let advance_output_buffer (slice: System.ArraySegment<uint8>) (conn: ConnectionState<'userdata>) =
+let advance_output_buffer (slice: System.ArraySegment<uint8>) (conn: ConnectionState) =
     {conn with OutputBuffer=slice}
 
 /// <summary>
 /// Resets the connection's output buffer pointer
 /// </summary>
-let reset_output_buffer (conn: ConnectionState<'userdata>) =
+let reset_output_buffer (conn: ConnectionState) =
     {conn with OutputBuffer=full_slice conn.OutputBuffer.Array}
 
 /// <summary>
 /// Reads a basic chunk header and returns the header type and chunk stream id
 /// </summary>
-let read_basic_header (conn: ConnectionState<_>) =
+let read_basic_header (conn: ConnectionState) =
     let read_slice = range_slice conn.InputBuffer 0 1
 
     // 5.3.1.1
@@ -257,7 +228,7 @@ let read_basic_header (conn: ConnectionState<_>) =
 /// Reads a message header and updates the state of the chunk
 /// header
 /// </summary>
-let read_message_header (conn: ConnectionState<_>)
+let read_message_header (conn: ConnectionState)
                         (ty: MessageHeaderType)
                         (stream_id: uint32) =
     let read_extended_timestamp () =
@@ -339,9 +310,8 @@ let read_message_header (conn: ConnectionState<_>)
 /// <summary>
 /// Sends a single message to the client
 /// </summary>
-let send_single_message (conn: ConnectionState<_>) (msg: RtmpChunkMessage) =
+let send_single_message (conn: ConnectionState) (msg: RtmpChunkMessage) =
     let mutable packet_slice = conn.OutputBuffer
-    let conn = invoke_callback (conn.Callbacks.OnMessageSent msg) conn
 
     match msg with
     | Handshake1 version ->
@@ -413,7 +383,7 @@ let send_single_message (conn: ConnectionState<_>) (msg: RtmpChunkMessage) =
 /// <summary>
 /// Reads and processes the next chunk stream packet
 /// </summary>
-let rec process_chunk_packet (conn: ConnectionState<_>) =
+let rec process_chunk_packet (conn: ConnectionState) =
     let update_stream_info header_type stream_id =
         read_message_header conn header_type stream_id
         |> Result.map (fun header_data ->
@@ -461,9 +431,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
     let process_command name transaction last_param msg_len stream_id conn =
         match name with
         | "connect" ->
-            let extra_context = AMFZero.parse_all last_param (msg_len - last_param.Offset)
-            let callback = conn.Callbacks.OnAMFZeroCommand (name, transaction, extra_context)
-            let conn = invoke_callback callback conn
+            // Ignore parsing out the extra AMF0 arguments that we don't use
 
             let window_size_slice = conn.OutputBuffer.Slice(0, 4)
             let window_size_header = {
@@ -534,6 +502,8 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
                 MessageStreamId=0u
             }
 
+            // TODO: Notify HTTP acceptor that connections are now allowed
+
             conn
             |> enqueue_reply (ChunkData (window_size_header, window_size_slice))
             |> enqueue_reply (ChunkData (chunk_size_header, chunk_size_slice))
@@ -543,11 +513,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             |> advance_output_buffer reply_end
 
         | "createStream" ->
-            let (_, info_context) = AMFZero.parse last_param
-
-            let callback =
-                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context])
-            let conn = invoke_callback callback conn
+            // Ignore parsing out the AMF0 arguments which we don't use
 
             let new_stream = conn.NextMessageStream
             let conn = {conn with NextMessageStream=new_stream + 1u}
@@ -574,21 +540,10 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
 
         | "deleteStream" ->
             // The client doesn't require a response to this, so it's currently a no-op
-            let (info_end, info_context) = AMFZero.parse last_param
-            let (_, stream_id_context) = AMFZero.parse info_end
-
-            let callback =
-                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context; stream_id_context])
-            invoke_callback callback conn
+            conn
 
         | "publish" ->
-            let (info_end, info_context) = AMFZero.parse last_param
-            let (pub_name_end, pub_name_context) = AMFZero.parse info_end
-            let (_, pub_type_context) = AMFZero.parse pub_name_end
-
-            let callback =
-                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context; pub_name_context; pub_type_context])
-            let conn = invoke_callback callback conn
+            // Ignore parsing out the AMF0 arguments which we don't use
 
             let reply_start = conn.OutputBuffer
             let reply_end = AMFZero.encode reply_start (AMFZero.StringVal "onStatus")
@@ -617,11 +572,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             |> advance_output_buffer reply_end
 
         | _ ->
-            let (_, info_context) = AMFZero.parse last_param
-
-            let callback =
-                conn.Callbacks.OnAMFZeroCommand (name, transaction, [info_context])
-            let conn = invoke_callback callback conn
+            // Ignore parsing out the AMF0 arguments which we don't use
 
             let reply_start = conn.OutputBuffer
             let reply_end = AMFZero.encode reply_start (AMFZero.StringVal name)
@@ -653,7 +604,6 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
         match stream_state.MessageType with
         | SetChunkSize ->
             let chunk_size = min 0xFFFFFFu (be_bytes_to_uint32 (full_slice message_bytes))
-            let conn = invoke_callback (conn.Callbacks.OnSetChunkSize chunk_size) conn
             if chunk_size <> 0u then
                 {conn with ChunkSize=chunk_size}
             else
@@ -661,7 +611,6 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
 
         | Abort ->
             let target_stream = be_bytes_to_uint32 (full_slice message_bytes)
-            let conn = invoke_callback conn.Callbacks.OnAbort conn
             let target_state = get_stream stream_id conn
             let flushed_state =
                 {target_state with Buffer=[]
@@ -669,23 +618,21 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             set_stream target_stream flushed_state conn
 
         | Acknowledge ->
-            let sequence_no = be_bytes_to_uint32 (full_slice message_bytes)
-            invoke_callback (conn.Callbacks.OnAcknowledge sequence_no) conn
+            // No-op, we don't track these
+            conn
 
         | UserControl ->
-            invoke_callback (conn.Callbacks.OnUserControl (full_slice message_bytes)) conn
+            // No-op, we don't implement these
+            conn
 
         | WindowAckSize ->
             let ack_window = be_bytes_to_uint32 (full_slice message_bytes)
             {conn with AckWindow={conn.AckWindow with Max=ack_window}}
-            |> invoke_callback (conn.Callbacks.OnWindowAckSize ack_window)
 
         | SetPeerBandwidth ->
-            // TODO - Needs to implement tracking of client ACKs within the
-            // output queue
-            let ack_window = be_bytes_to_uint32 (full_slice message_bytes)
-            let limit_type = message_bytes.[5]
-            invoke_callback (conn.Callbacks.OnSetPeerBandwidth ack_window limit_type) conn
+            // No-op, we don't send enough data that the peer needs to worry
+            // about bandwidth
+            conn
 
         | CommandAMF0 ->
             let (cmd_end, cmd_context) = AMFZero.parse (full_slice message_bytes)
@@ -699,22 +646,25 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
             let (handler_end, handler_context) = AMFZero.parse (full_slice message_bytes)
             let arg_contexts = AMFZero.parse_all handler_end (message_bytes.Length - handler_end.Offset)
 
+            // TODO: Pass this along to the HTTP repeater so it can store
+            // metadata for FLV headers
             let (AMFZero.StringVal handler) = handler_context.Value
-            invoke_callback (conn.Callbacks.OnAMFZeroData (handler, arg_contexts)) conn
+            conn
 
         | VideoData ->
-            invoke_callback (conn.Callbacks.OnVideoData message_bytes) conn
+            // TODO: Pass this to the HTTP repeater for relay and possible
+            // keyframe/sequence header analysis
+            conn
 
         | AudioData ->
-            invoke_callback (conn.Callbacks.OnAudioData message_bytes) conn
+            // TODO: Pass to the HTTP repeater for relay
+            conn
 
         | _ ->
             conn
 
-    let process_chunk_bytes (bytes, stream_id, header_info, conn) =
-        let message = ChunkData (header_info, bytes)
-        let conn = invoke_callback (conn.Callbacks.OnMessageReceived message) conn
-
+    let process_chunk_bytes (bytes, stream_id, conn) =
+        let (bytes: System.ArraySegment<uint8>) = bytes
         let (buffer_bytes: uint8 array) = Array.zeroCreate bytes.Count
         bytes.CopyTo(buffer_bytes)
 
@@ -781,17 +731,8 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
         read_basic_header conn
         |> Result.bind (fun (header_type, stream_id) ->
             update_stream_info header_type stream_id
-            |> Result.map (fun stream_state ->
-                let header_info = {
-                    ChunkStreamId=stream_id
-                    Timestamp=stream_state.Timestamp
-                    MessageRemaining=stream_state.MessageRemaining
-                    MessageHeader=header_type
-                    MessageType=stream_state.MessageType
-                    MessageStreamId=stream_state.MessageStreamId
-                }
-                (stream_id, header_info, stream_state)))
-        |> Result.bind (fun (stream_id, header_info, stream_state) ->
+            |> Result.map (fun stream_state -> (stream_id, stream_state)))
+        |> Result.bind (fun (stream_id, stream_state) ->
           let data_size = min conn.ChunkSize stream_state.MessageRemaining
           let msg_left = stream_state.MessageRemaining - data_size
           let stream_state = {stream_state with MessageRemaining=msg_left}
@@ -799,7 +740,7 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
 
           let read_slice = range_slice conn.InputBuffer 0 (int data_size)
           read_net_bytes conn.Socket read_slice conn.Timeout
-          |> Result.map (fun bytes -> (bytes, stream_id, header_info, conn)))
+          |> Result.map (fun bytes -> (bytes, stream_id, conn)))
         |> Result.bind process_chunk_bytes
 
     match read_result with
@@ -807,14 +748,15 @@ let rec process_chunk_packet (conn: ConnectionState<_>) =
         process_chunk_packet conn
 
     | Result.Error msg ->
-        invoke_callback (conn.Callbacks.OnConnectionClose msg) conn |> ignore
+        eprintfn "Recieved error from streamer: %s" msg
+        // TODO: Notify HTTP receiver and acceptor that the stream is over
         conn.Socket.Close()
 
 /// <summary>
 /// Validates the acknowledgment handshake from the client and enters the main
 /// RTMP state
 /// </summary>
-let ack_handshake_state (conn: ConnectionState<_>)
+let ack_handshake_state (conn: ConnectionState)
                         (server_time: uint32)
                         (server_random: uint8 array) =
     // Section 5.2.4
@@ -824,45 +766,33 @@ let ack_handshake_state (conn: ConnectionState<_>)
         let ack_time = be_bytes_to_uint32 bytes
         let ack_data = bytes.Slice(8)
 
-        let peer_message = Handshake3 {
-            AckTimestamp=ack_time
-            ReadTimestamp=be_bytes_to_uint32 (bytes.Slice(4))
-            AckRandomData=ack_data
-        }
-
-        let conn = invoke_callback (conn.Callbacks.OnMessageReceived peer_message) conn
-
         if ack_time <> server_time then
-            invoke_callback (conn.Callbacks.OnConnectionClose "Incorrect timestamp ACK") conn |> ignore
+            eprintfn "Streamer did not reply with correct timestamp"
+            // TODO: Terminate other threads
             conn.Socket.Close()
         elif not (slices_equal ack_data (full_slice server_random)) then
-            invoke_callback (conn.Callbacks.OnConnectionClose "Incorrect random data ACK") conn |> ignore
+            eprintfn "Streamer did not reply with correct random data"
+            // TODO: Terminate other threads
             conn.Socket.Close()
         else
             process_chunk_packet conn
     | Result.Error msg ->
-        invoke_callback (conn.Callbacks.OnConnectionClose msg) conn |> ignore
+        eprintfn "Recieved error from streamer: %s" msg
+        // TODO: Terminate other threads
         conn.Socket.Close()
 
 /// <summary>
 /// Waits for the secondary handshake from the client and passes control onto
 /// the acknowledgment handshake state
 /// </summary>
-let client_handshake2_state (conn: ConnectionState<_>) =
+let client_handshake2_state (conn: ConnectionState) =
     // Section 5.2.3
     let read_slice = range_slice conn.InputBuffer 0 1536
     match read_net_bytes conn.Socket read_slice conn.Timeout with
     | Result.Ok bytes ->
         let recv_timestamp = uint32 (unix_time_ms () - conn.TimestampEpoch)
         let peer_timestamp = be_bytes_to_uint32 bytes
-
         let data_slice = bytes.Slice(8)
-        let peer_message = Handshake2 {
-            InitTimestamp=peer_timestamp
-            RandomData=data_slice
-        }
-
-        let conn = invoke_callback (conn.Callbacks.OnMessageReceived peer_message) conn
 
         // Version handshake 5.2.2
         let conn = send_single_message conn (Handshake1 3uy)
@@ -885,43 +815,40 @@ let client_handshake2_state (conn: ConnectionState<_>) =
 
         ack_handshake_state conn 0u server_random
     | Result.Error msg ->
-        invoke_callback (conn.Callbacks.OnConnectionClose msg) conn |> ignore
+        eprintfn "Received error from streamer: %s" msg
+        // TODO: Terminate other threads
         conn.Socket.Close()
 
 /// <summary>
 /// Waits for the initial handshake from the client and passes control onto the
 /// secondary handshake state
 /// </summary>
-let client_handshake1_state (conn: ConnectionState<_>) =
+let client_handshake1_state (conn: ConnectionState) =
     // Section 5.2.2
     let read_slice = range_slice conn.InputBuffer 0 1
     match read_net_bytes conn.Socket read_slice conn.Timeout with
     | Result.Ok bytes ->
-        let message = Handshake1 bytes.[0]
-        let conn = invoke_callback (conn.Callbacks.OnMessageReceived message) conn
-
         if bytes.[0] <> 3uy then
-            invoke_callback (conn.Callbacks.OnConnectionClose "Unsupported RTMP version requested by client") conn |> ignore
+            eprintfn "Streamer requested unsupported RTMP version %d" bytes.[0]
+            // TODO: Terminate other threads
             conn.Socket.Close()
         else
             client_handshake2_state conn
     | Result.Error msg ->
-        invoke_callback (conn.Callbacks.OnConnectionClose msg) conn |> ignore
+        eprintfn "Received error from streamer: %s" msg
+        // TODO: Terminate other threads
         conn.Socket.Close()
 
 /// <summary>
 /// Accepts a socket and manages the RTMP chunk session on it. Any messages which are received are
 /// passed onto the ChunkEvents handler.
 /// </summary>
-let chunk_protocol (connection: Socket) (events: ChunkEvents<_>) =
-    let user_data = events.InitialState ()
+let chunk_protocol (connection: Socket) =
     let connection_state = {
         Streams=Map.empty
         NextMessageStream=3u
         Socket=connection
         Timeout=60 * 1000
-        Callbacks=events
-        UserData=user_data
         TimestampEpoch=unix_time_ms ()
         // Must be at least 1536 bytes to fit handshakes
         InputBuffer=Array.zeroCreate (32 * 1024)
