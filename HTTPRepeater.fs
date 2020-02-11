@@ -113,10 +113,6 @@ let process_video (state: RepeaterState) (video: byte array) =
         | (Some _, true) ->
             // With both metadata and the AVC sequence header we can initialize
             // new clients and start streaming data to them
-            let new_clients = List.length state.NewConnections
-            if new_clients > 0 then
-                eprintfn "Processing %d new clients on keyframe" (List.length state.NewConnections)
-
             let added_connections =
                 state.NewConnections
                 |> List.map (fun client -> (client, init_client state client))

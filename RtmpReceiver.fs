@@ -1,4 +1,4 @@
-module ChunkProtocol
+module RtmpReceiver
 open Utils
 
 open System.Collections.Concurrent

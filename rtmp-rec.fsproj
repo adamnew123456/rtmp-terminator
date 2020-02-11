@@ -12,7 +12,7 @@
     <Compile Include="FLVVideo.fs" />
     <Compile Include="HTTPRepeater.fs" />
     <Compile Include="HTTPAcceptor.fs" />
-    <Compile Include="ChunkProtocol.fs" />
+    <Compile Include="RtmpReceiver.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
