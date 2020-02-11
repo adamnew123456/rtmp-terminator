@@ -1,6 +1,8 @@
 module ChunkProtocol
-open System.Net.Sockets
 open Utils
+
+open System.Collections.Concurrent
+open System.Net.Sockets
 
 type Timestamp = uint32
 
@@ -141,6 +143,8 @@ type ConnectionState = {
     ChunkSize: uint32
     AckWindow: RolloverCounter
     OutputQueue: RtmpChunkMessage list
+    AcceptorMailbox: BlockingCollection<HTTPAcceptor.Events>
+    RepeaterMailbox: BlockingCollection<HTTPRepeater.Events>
 }
 
 /// <summary>
@@ -190,6 +194,15 @@ let advance_output_buffer (slice: System.ArraySegment<uint8>) (conn: ConnectionS
 /// </summary>
 let reset_output_buffer (conn: ConnectionState) =
     {conn with OutputBuffer=full_slice conn.OutputBuffer.Array}
+
+/// <summary>
+/// Closes the RTMP session and notifies other threads of termination
+/// </summary>
+let end_connection (conn: ConnectionState) (message: string) =
+    eprintfn "%s" message
+    conn.AcceptorMailbox.Add(HTTPAcceptor.Stopped)
+    conn.RepeaterMailbox.Add(HTTPRepeater.Stopped)
+    conn.Socket.Close()
 
 /// <summary>
 /// Reads a basic chunk header and returns the header type and chunk stream id
@@ -502,7 +515,7 @@ let rec process_chunk_packet (conn: ConnectionState) =
                 MessageStreamId=0u
             }
 
-            // TODO: Notify HTTP acceptor that connections are now allowed
+            conn.AcceptorMailbox.Add(HTTPAcceptor.Started)
 
             conn
             |> enqueue_reply (ChunkData (window_size_header, window_size_slice))
@@ -646,18 +659,20 @@ let rec process_chunk_packet (conn: ConnectionState) =
             let (handler_end, handler_context) = AMFZero.parse (full_slice message_bytes)
             let arg_contexts = AMFZero.parse_all handler_end (message_bytes.Length - handler_end.Offset)
 
-            // TODO: Pass this along to the HTTP repeater so it can store
-            // metadata for FLV headers
             let (AMFZero.StringVal handler) = handler_context.Value
-            conn
+            match (handler, arg_contexts) with
+            | ("@setDataFrame", _ :: metadata :: _) ->
+                conn.RepeaterMailbox.Add(HTTPRepeater.MetadataReceived  metadata.Value)
+                conn
+            | _ ->
+                conn
 
         | VideoData ->
-            // TODO: Pass this to the HTTP repeater for relay and possible
-            // keyframe/sequence header analysis
+            conn.RepeaterMailbox.Add(HTTPRepeater.VideoReceived (stream_state.Timestamp, message_bytes))
             conn
 
         | AudioData ->
-            // TODO: Pass to the HTTP repeater for relay
+            conn.RepeaterMailbox.Add(HTTPRepeater.AudioReceived (stream_state.Timestamp, message_bytes))
             conn
 
         | _ ->
@@ -748,9 +763,7 @@ let rec process_chunk_packet (conn: ConnectionState) =
         process_chunk_packet conn
 
     | Result.Error msg ->
-        eprintfn "Recieved error from streamer: %s" msg
-        // TODO: Notify HTTP receiver and acceptor that the stream is over
-        conn.Socket.Close()
+        end_connection conn (sprintf "Received error from streamer: %s" msg)
 
 /// <summary>
 /// Validates the acknowledgment handshake from the client and enters the main
@@ -767,19 +780,13 @@ let ack_handshake_state (conn: ConnectionState)
         let ack_data = bytes.Slice(8)
 
         if ack_time <> server_time then
-            eprintfn "Streamer did not reply with correct timestamp"
-            // TODO: Terminate other threads
-            conn.Socket.Close()
+            end_connection conn "Streamer did not ACK correct timestamp"
         elif not (slices_equal ack_data (full_slice server_random)) then
-            eprintfn "Streamer did not reply with correct random data"
-            // TODO: Terminate other threads
-            conn.Socket.Close()
+            end_connection conn "Streamer did not ACK correct random data"
         else
             process_chunk_packet conn
     | Result.Error msg ->
-        eprintfn "Recieved error from streamer: %s" msg
-        // TODO: Terminate other threads
-        conn.Socket.Close()
+        end_connection conn (sprintf "Received error from streamer: %s" msg)
 
 /// <summary>
 /// Waits for the secondary handshake from the client and passes control onto
@@ -815,9 +822,7 @@ let client_handshake2_state (conn: ConnectionState) =
 
         ack_handshake_state conn 0u server_random
     | Result.Error msg ->
-        eprintfn "Received error from streamer: %s" msg
-        // TODO: Terminate other threads
-        conn.Socket.Close()
+        end_connection conn (sprintf "Received error from streamer: %s" msg)
 
 /// <summary>
 /// Waits for the initial handshake from the client and passes control onto the
@@ -829,21 +834,19 @@ let client_handshake1_state (conn: ConnectionState) =
     match read_net_bytes conn.Socket read_slice conn.Timeout with
     | Result.Ok bytes ->
         if bytes.[0] <> 3uy then
-            eprintfn "Streamer requested unsupported RTMP version %d" bytes.[0]
-            // TODO: Terminate other threads
-            conn.Socket.Close()
+            end_connection conn (sprintf "Unsupported RTMP version %d" bytes.[0])
         else
             client_handshake2_state conn
     | Result.Error msg ->
-        eprintfn "Received error from streamer: %s" msg
-        // TODO: Terminate other threads
-        conn.Socket.Close()
+        end_connection conn (sprintf "Received error from streamer: %s" msg)
 
 /// <summary>
 /// Accepts a socket and manages the RTMP chunk session on it. Any messages which are received are
 /// passed onto the ChunkEvents handler.
 /// </summary>
-let chunk_protocol (connection: Socket) =
+let chunk_protocol (connection: Socket)
+                   (acceptor_mbox: BlockingCollection<HTTPAcceptor.Events>)
+                   (repeater_mbox: BlockingCollection<HTTPRepeater.Events>) =
     let connection_state = {
         Streams=Map.empty
         NextMessageStream=3u
@@ -860,6 +863,17 @@ let chunk_protocol (connection: Socket) =
             TimesFilled=0u
         }
         OutputQueue=[]
+        AcceptorMailbox=acceptor_mbox
+        RepeaterMailbox=repeater_mbox
     }
 
     client_handshake1_state connection_state
+
+/// <summary>
+/// Waits for a connection and then manages the session when it receives one
+/// </summary>
+let runner (server: Socket)
+           (acceptor_mbox: BlockingCollection<HTTPAcceptor.Events>)
+           (repeater_mbox: BlockingCollection<HTTPRepeater.Events>) =
+    let client = server.Accept()
+    chunk_protocol client acceptor_mbox repeater_mbox

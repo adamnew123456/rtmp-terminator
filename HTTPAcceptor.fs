@@ -25,9 +25,11 @@ let runner (server: Socket)
     let accept_client started =
         let client = server.Accept()
         if not started then
+            eprintf "New client on %A: Sending not-streaming error" client.RemoteEndPoint
             client.Send(not_streaming_error) |> ignore
             client.Close()
         else
+            eprintf "New client on %A: Sending OK" client.RemoteEndPoint
             client.Send(streaming_response) |> ignore
             repeater_mbox.Add(HTTPRepeater.NewConnection client)
 
@@ -47,7 +49,7 @@ let runner (server: Socket)
 
             | Stopped ->
                 server.Close()
-
-        step started accept_list
+        else
+            step started accept_list
 
     step false (System.Collections.ArrayList())
