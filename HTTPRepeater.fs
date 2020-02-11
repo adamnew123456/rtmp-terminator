@@ -20,22 +20,21 @@ type RepeaterState = {
     SequenceHeader: byte array option
     Metadata: AMFZero.ValueType
     Timestamp: uint32
+    Buffer: System.ArraySegment<uint8>
 }
 
 /// <summary>
 /// Sends the initial FLV header and frame of metadata to the client
 /// </summary>
 let init_client (state: RepeaterState) (client: Socket) =
-    eprintf "Initializing FLV on new client from %A" client.RemoteEndPoint
+    eprintfn "Initializing FLV on new client from %A" client.RemoteEndPoint
     try
-        let (slice, stream) = FLVVideo.init_stream state.Timestamp state.Metadata
+        let (slice, stream) = FLVVideo.init_stream state.Timestamp state.Metadata state.Buffer
         net_send_bytes client slice
 
         let (Some seq_header) = state.SequenceHeader
-        let slice = FLVVideo.write_video_frame stream
-                                               state.Timestamp
-                                               (full_slice seq_header)
-
+        let slice = FLVVideo.write_video_frame state.Buffer (full_slice seq_header)
+        FLVVideo.patch_frame_timestamp stream 0u
 
         net_send_bytes client slice
         Result.Ok stream
@@ -47,10 +46,11 @@ let init_client (state: RepeaterState) (client: Socket) =
 /// Sends a video frame to all existing clients
 /// </summary>
 let send_video (state: RepeaterState) (video: System.ArraySegment<uint8>) =
+    let slice = FLVVideo.write_video_frame state.Buffer video
     let connections =
         state.ExistingConnections
         |> List.filter (fun (client, stream) ->
-            let slice = FLVVideo.write_video_frame stream state.Timestamp video
+            FLVVideo.patch_frame_timestamp stream state.Timestamp
             try
                 net_send_bytes client slice
                 true
@@ -65,10 +65,11 @@ let send_video (state: RepeaterState) (video: System.ArraySegment<uint8>) =
 /// Sends an audio frame to all existing clients
 /// </summary>
 let send_audio (state: RepeaterState) (audio: System.ArraySegment<uint8>) =
+    let slice = FLVVideo.write_audio_frame state.Buffer audio
     let connections =
         state.ExistingConnections
         |> List.filter (fun (client, stream) ->
-            let slice = FLVVideo.write_audio_frame stream state.Timestamp audio
+            FLVVideo.patch_frame_timestamp stream state.Timestamp
             try
                 net_send_bytes client slice
                 true
@@ -168,6 +169,7 @@ let runner (mailbox: BlockingCollection<Events>) =
         SequenceHeader=None
         Metadata=AMFZero.NullVal
         Timestamp=0u
+        Buffer=full_slice (Array.zeroCreate (2 * 1024 * 1024))
     }
 
     step state
