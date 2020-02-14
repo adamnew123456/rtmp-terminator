@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>netcoreapp3.1</TargetFramework>
-    <RootNamespace>rtmp_rec</RootNamespace>
+    <RootNamespace>rtmp_terminator</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
