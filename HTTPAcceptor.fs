@@ -48,7 +48,7 @@ let runner (server: Socket)
                 step true accept_list
 
             | Stopped ->
-                server.Close()
+                step false accept_list
         else
             step started accept_list
 

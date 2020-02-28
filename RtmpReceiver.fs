@@ -872,8 +872,11 @@ let chunk_protocol (connection: Socket)
 /// <summary>
 /// Waits for a connection and then manages the session when it receives one
 /// </summary>
-let runner (server: Socket)
-           (acceptor_mbox: BlockingCollection<HTTPAcceptor.Events>)
-           (repeater_mbox: BlockingCollection<HTTPRepeater.Events>) =
+let rec runner (server: Socket)
+               (acceptor_mbox: BlockingCollection<HTTPAcceptor.Events>)
+               (repeater_mbox: BlockingCollection<HTTPRepeater.Events>) =
+    eprintfn "Waiting for streamer connection"
     let client = server.Accept()
+    eprintfn "Got streamer connection"
     chunk_protocol client acceptor_mbox repeater_mbox
+    runner server acceptor_mbox repeater_mbox

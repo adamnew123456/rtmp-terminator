@@ -157,11 +157,18 @@ let runner (mailbox: BlockingCollection<Events>) =
             step {state with NewConnections=client :: state.NewConnections}
 
         | Stopped ->
+            eprintfn "Stopping existing stream clients"
             state.NewConnections
             |> List.iter (fun conn -> conn.Close())
 
             state.ExistingConnections
             |> List.iter (fun (conn, _) -> conn.Close())
+
+            step {state with ExistingConnections=[]
+                             NewConnections=[]
+                             SequenceHeader=None
+                             Metadata=AMFZero.NullVal
+                             Timestamp=0u}
 
     let state = {
         ExistingConnections=[]
